@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from contextlib import contextmanager
 import io
 import ipaddress
 import json
@@ -39,8 +40,21 @@ def db_connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def db_session():
+    conn = db_connect()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
-    with db_connect() as conn:
+    with db_session() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pages (
@@ -125,7 +139,7 @@ async def save_page(url: str, final_url: str, status: int, title: str,
                     description: str, content: str, links: list[str]) -> None:
     now = datetime.now(timezone.utc).isoformat()
     async with db_lock:
-        with db_connect() as conn:
+        with db_session() as conn:
             conn.execute("""
                 INSERT INTO pages(url, final_url, status_code, title, description, content, crawled_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -260,7 +274,7 @@ async def get_job(job_id: str):
 @app.get("/search", dependencies=[Depends(require_api_key)])
 async def search_pages(q: str = Query(..., min_length=2, max_length=200)):
     try:
-        with db_connect() as conn:
+        with db_session() as conn:
             rows = conn.execute("""
                 SELECT url, title, snippet(page_search, 2, '<b>', '</b>', '…', 16) AS snippet
                 FROM page_search WHERE page_search MATCH ? LIMIT 50
@@ -272,7 +286,7 @@ async def search_pages(q: str = Query(..., min_length=2, max_length=200)):
 
 @app.get("/stats", dependencies=[Depends(require_api_key)])
 async def stats():
-    with db_connect() as conn:
+    with db_session() as conn:
         pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
         links = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
     return {"pages": pages, "links": links, "active_jobs": sum(
@@ -284,7 +298,7 @@ async def stats():
 async def export_pages(format: str):
     if format not in {"json", "csv"}:
         raise HTTPException(status_code=400, detail="Format must be json or csv.")
-    with db_connect() as conn:
+    with db_session() as conn:
         rows = [dict(row) for row in conn.execute(
             "SELECT url, final_url, status_code, title, description, content, crawled_at FROM pages ORDER BY crawled_at DESC"
         ).fetchall()]
